@@ -144,7 +144,42 @@ issue_ssl_cert() {
     local certPath="/root/cert/${domain}"
     mkdir -p "$certPath"
 
-    echo -e "${yellow}正在为 ${domain} 申请 SSL 证书...${plain}"
+    # ===== 第一优先：检查目标目录是否已有证书 =====
+    if [[ -f "${certPath}/fullchain.pem" ]] && [[ -f "${certPath}/privkey.pem" ]]; then
+        echo -e "${green}✅ 检测到本地已有证书文件：${plain}"
+        echo -e "  证书：${certPath}/fullchain.pem"
+        echo -e "  密钥：${certPath}/privkey.pem"
+        echo -e "${green}直接使用现有证书，跳过申请流程${plain}"
+        return 0
+    fi
+
+    # ===== 第二优先：检查 acme.sh 缓存目录是否有证书 =====
+    local ecc_dir="${HOME}/.acme.sh/${domain}_ecc"
+    local rsa_dir="${HOME}/.acme.sh/${domain}"
+    local found_in_acme=false
+
+    if [[ -f "${ecc_dir}/fullchain.cer" ]] && [[ -f "${ecc_dir}/${domain}.key" ]]; then
+        echo -e "${green}在 acme.sh 缓存中找到 ECC 证书，正在复制...${plain}"
+        cp -f "${ecc_dir}/fullchain.cer" "${certPath}/fullchain.pem"
+        cp -f "${ecc_dir}/${domain}.key" "${certPath}/privkey.pem"
+        found_in_acme=true
+    elif [[ -f "${rsa_dir}/fullchain.cer" ]] && [[ -f "${rsa_dir}/${domain}.key" ]]; then
+        echo -e "${green}在 acme.sh 缓存中找到 RSA 证书，正在复制...${plain}"
+        cp -f "${rsa_dir}/fullchain.cer" "${certPath}/fullchain.pem"
+        cp -f "${rsa_dir}/${domain}.key" "${certPath}/privkey.pem"
+        found_in_acme=true
+    fi
+
+    if [[ "$found_in_acme" == true ]]; then
+        chmod 755 "${certPath}"/* 2>/dev/null
+        echo -e "${green}✅ 已从 acme.sh 缓存安装证书${plain}"
+        echo -e "  证书：${certPath}/fullchain.pem"
+        echo -e "  密钥：${certPath}/privkey.pem"
+        return 0
+    fi
+
+    # ===== 第三：全新申请证书 =====
+    echo -e "${yellow}未找到已有证书，开始申请新证书...${plain}"
 
     # DNS 预检查
     echo -e "${yellow}检查域名 DNS 解析...${plain}"
@@ -157,9 +192,8 @@ issue_ssl_cert() {
     fi
 
     if [[ -z "$resolved_ip" ]]; then
-        echo -e "${red}域名 ${domain} 无法解析！请先在 DNS 中添加 A 记录指向本机 IP${plain}"
-        echo -e "${yellow}提示：如果刚添加 DNS 记录，可能需要等待几分钟生效${plain}"
-        read -p "是否仍要尝试申请？[y/n]：" force_try
+        echo -e "${red}域名 ${domain} 无法解析！请先添加 A 记录指向本机 IP${plain}"
+        read -p "是否仍要尝试？[y/n]：" force_try
         if [[ "${force_try}" != "y" && "${force_try}" != "Y" ]]; then
             return 1
         fi
@@ -172,68 +206,36 @@ issue_ssl_cert() {
     # 释放 80 端口
     free_port_80
 
-    # 检查是否已有证书记录
-    local has_existing=false
-    if ~/.acme.sh/acme.sh --list 2>/dev/null | grep -q "${domain}"; then
-        has_existing=true
-        echo -e "${yellow}检测到域名 ${domain} 已有证书记录${plain}"
-
-        # 检查证书文件是否真的存在
-        local ecc_dir="${HOME}/.acme.sh/${domain}_ecc"
-        local rsa_dir="${HOME}/.acme.sh/${domain}"
-        if [[ -f "${ecc_dir}/fullchain.cer" ]] || [[ -f "${rsa_dir}/fullchain.cer" ]]; then
-            echo -e "${green}证书文件存在，直接安装...${plain}"
-        else
-            echo -e "${yellow}证书文件已丢失，使用 --force 重新申请...${plain}"
-            ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
-            if [[ $? -ne 0 ]]; then
-                echo -e "${red}证书重新申请失败！${plain}"
-                restore_port_80
-                return 1
-            fi
-        fi
-    else
-        # 全新申请
-        ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 2>&1
-        if [[ $? -ne 0 ]]; then
-            echo -e "${yellow}首次申请未成功，使用 --force 重试...${plain}"
-            ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
-            if [[ $? -ne 0 ]]; then
-                echo -e "${red}证书申请失败！请确认域名已正确解析到本机 IP${plain}"
-                restore_port_80
-                return 1
-            fi
-        fi
+    # 申请证书
+    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
+    if [[ $? -ne 0 ]]; then
+        echo -e "${red}证书申请失败！请确认域名已正确解析到本机 IP${plain}"
+        restore_port_80
+        return 1
     fi
 
-    # 安装证书到指定目录（先尝试 ECC，失败再尝试 RSA）
+    # 安装证书（先 ECC 后 RSA）
     local install_ok=false
-
     ~/.acme.sh/acme.sh --installcert -d "${domain}" --ecc \
         --key-file "${certPath}/privkey.pem" \
         --fullchain-file "${certPath}/fullchain.pem" 2>&1
     if [[ $? -eq 0 ]]; then
         install_ok=true
     else
-        echo -e "${yellow}ECC 方式安装失败，尝试 RSA 方式...${plain}"
         ~/.acme.sh/acme.sh --installcert -d "${domain}" \
             --key-file "${certPath}/privkey.pem" \
             --fullchain-file "${certPath}/fullchain.pem" 2>&1
-        if [[ $? -eq 0 ]]; then
-            install_ok=true
-        fi
+        [[ $? -eq 0 ]] && install_ok=true
     fi
 
     if [[ "$install_ok" != true ]]; then
-        echo -e "${red}证书安装到本地目录失败${plain}"
+        echo -e "${red}证书安装失败${plain}"
         restore_port_80
         return 1
     fi
 
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade 2>/dev/null
     chmod 755 "${certPath}"/* 2>/dev/null
-
-    # 恢复之前停止的服务
     restore_port_80
 
     echo -e "${green}✅ SSL 证书申请并安装成功！${plain}"
