@@ -245,6 +245,7 @@ issue_ssl_cert() {
 }
 
 # 将域名和证书路径写入 S-UI 数据库
+# NOTE: S-UI settings 表是 key-value 结构（id, key, value 三列）
 configure_ssl_in_sui() {
     local domain=$1
     local certFile=$2
@@ -264,64 +265,27 @@ configure_ssl_in_sui() {
         return 1
     fi
 
-    # 列出所有表
-    local tables=$(sqlite3 "$dbFile" ".tables" 2>/dev/null)
-    echo -e "${yellow}数据库表：${tables}${plain}"
-
-    # 找到设置表（可能叫 settings / setting / panel_settings 等）
-    local setting_table=""
-    for t in settings setting panel_settings config; do
-        if echo "$tables" | grep -qw "$t"; then
-            setting_table="$t"
-            break
-        fi
-    done
-
-    if [[ -z "$setting_table" ]]; then
-        echo -e "${red}未找到设置表，数据库中的表有：${tables}${plain}"
-        echo -e "${yellow}请在面板 Web 界面中手动填写域名和证书路径${plain}"
-        return 1
-    fi
-
-    echo -e "${yellow}使用设置表：${setting_table}${plain}"
-
-    # 获取该表所有字段
-    local all_columns=$(sqlite3 "$dbFile" "PRAGMA table_info(${setting_table});" 2>/dev/null | awk -F'|' '{print $2}')
-    echo -e "${yellow}表字段：${all_columns}${plain}"
-
     # 停止服务避免写入冲突
     systemctl stop s-ui 2>/dev/null
 
-    # 匹配域名字段（模糊匹配含 domain 的字段）
-    local domain_col=$(echo "$all_columns" | grep -i "domain" | head -1)
-    if [[ -n "$domain_col" ]]; then
-        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${domain_col}='${domain}';"
-        echo -e "${green}✅ 已设置域名 [${domain_col}] = ${domain}${plain}"
-    else
-        echo -e "${red}未找到域名字段${plain}"
-    fi
+    echo -e "${yellow}正在写入 SSL 配置到数据库...${plain}"
 
-    # 匹配证书字段（含 cert 的字段）
-    local cert_col=$(echo "$all_columns" | grep -i "cert" | head -1)
-    if [[ -n "$cert_col" ]]; then
-        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${cert_col}='${certFile}';"
-        echo -e "${green}✅ 已设置证书 [${cert_col}] = ${certFile}${plain}"
-    else
-        echo -e "${red}未找到证书字段${plain}"
-    fi
+    # 面板（web）配置
+    sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='webDomain';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='webListen';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${certFile}' WHERE key='webCertFile';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${keyFile}' WHERE key='webKeyFile';"
 
-    # 匹配密钥字段（含 key 的字段，排除 primary key 等）
-    local key_col=$(echo "$all_columns" | grep -i "key" | grep -iv "primary" | head -1)
-    if [[ -n "$key_col" ]]; then
-        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${key_col}='${keyFile}';"
-        echo -e "${green}✅ 已设置密钥 [${key_col}] = ${keyFile}${plain}"
-    else
-        echo -e "${red}未找到密钥字段${plain}"
-    fi
+    # 订阅（sub）配置
+    sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='subDomain';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='subListen';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${certFile}' WHERE key='subCertFile';"
+    sqlite3 "$dbFile" "UPDATE settings SET value='${keyFile}' WHERE key='subKeyFile';"
 
     # 验证写入结果
-    echo -e "${yellow}验证数据库写入结果：${plain}"
-    sqlite3 "$dbFile" "SELECT * FROM ${setting_table} LIMIT 1;" 2>/dev/null | head -3
+    echo -e "${green}✅ SSL 配置已写入数据库：${plain}"
+    sqlite3 "$dbFile" -header -column \
+        "SELECT key, value FROM settings WHERE key IN ('webDomain','webCertFile','webKeyFile','subDomain','subCertFile','subKeyFile','webListen','subListen');"
 
     return 0
 }
