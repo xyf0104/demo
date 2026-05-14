@@ -116,7 +116,7 @@ uninstall() {
     fi
     systemctl stop s-ui
     systemctl disable s-ui
-    rm /etc/systemd/system/s-ui.服务 -f
+    rm /etc/systemd/system/s-ui.service -f
     systemctl daemon-reload
     systemctl reset-failed
     rm /etc/s-ui/ -rf
@@ -288,7 +288,7 @@ disable() {
 }
 
 show_log() {
-    journalctl -u $1.服务 -e --no-pager -f
+    journalctl -u $1.service -e --no-pager -f
     if [[ $# == 1 ]]; then
         before_show_menu
     fi
@@ -307,7 +307,7 @@ update_shell() {
 }
 
 check_status() {
-    if [[ ! -f "/etc/systemd/system/$1.服务" ]]; then
+    if [[ ! -f "/etc/systemd/system/$1.service" ]]; then
         return 2
     fi
     temp=$(systemctl status "$1" | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)

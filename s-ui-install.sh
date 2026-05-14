@@ -487,17 +487,28 @@ install_s-ui() {
     echo -e "————————————————————————————————————"
 
     if [[ "$SSL_CONFIGURED" == true ]]; then
-        # 获取配置的端口和路径
-        local panel_port=$(grep -oP 'port.*?(\d+)' /usr/local/s-ui/db/s-ui.db 2>/dev/null || echo "")
-        # 从 sui uri 获取
-        local uri_info=$(/usr/local/s-ui/sui uri 2>/dev/null)
+        # 从 sui setting -show 提取端口和路径
+        local setting_info=$(/usr/local/s-ui/sui setting -show 2>/dev/null)
+        local panel_port=$(echo "$setting_info" | grep "Panel port" | awk '{print $NF}')
+        local panel_path=$(echo "$setting_info" | grep "Panel path" | awk '{print $NF}')
+        local sub_port=$(echo "$setting_info" | grep "Sub port" | awk '{print $NF}')
+        local sub_path=$(echo "$setting_info" | grep "Sub path" | awk '{print $NF}')
+
+        # 默认值
+        [[ -z "$panel_port" ]] && panel_port="2095"
+        [[ -z "$panel_path" ]] && panel_path="/"
+
         echo -e "${green}面板访问地址：${plain}"
-        echo -e "${green}  https://${SSL_DOMAIN}${plain}"
+        echo -e "${green}  https://${SSL_DOMAIN}:${panel_port}${panel_path}${plain}"
+        if [[ -n "$sub_port" ]]; then
+            echo -e "${green}订阅访问地址：${plain}"
+            echo -e "${green}  https://${SSL_DOMAIN}:${sub_port}${sub_path}${plain}"
+        fi
         echo -e ""
-        echo -e "${yellow}如果端口非 443，请在域名后加上端口号${plain}"
         echo -e "${yellow}证书路径：${SSL_CERT}${plain}"
         echo -e "${yellow}密钥路径：${SSL_KEY}${plain}"
     else
+        # 无 SSL，直接用 sui uri 输出
         echo -e "${green}面板访问地址：${plain}"
         /usr/local/s-ui/sui uri
     fi
