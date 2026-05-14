@@ -146,45 +146,92 @@ issue_ssl_cert() {
 
     echo -e "${yellow}正在为 ${domain} 申请 SSL 证书...${plain}"
 
+    # DNS 预检查
+    echo -e "${yellow}检查域名 DNS 解析...${plain}"
+    local resolved_ip=$(dig +short "$domain" A 2>/dev/null | head -1)
+    if [[ -z "$resolved_ip" ]]; then
+        resolved_ip=$(host "$domain" 2>/dev/null | grep "has address" | head -1 | awk '{print $NF}')
+    fi
+    if [[ -z "$resolved_ip" ]]; then
+        resolved_ip=$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address" | awk '{print $2}' | head -1)
+    fi
+
+    if [[ -z "$resolved_ip" ]]; then
+        echo -e "${red}域名 ${domain} 无法解析！请先在 DNS 中添加 A 记录指向本机 IP${plain}"
+        echo -e "${yellow}提示：如果刚添加 DNS 记录，可能需要等待几分钟生效${plain}"
+        read -p "是否仍要尝试申请？[y/n]：" force_try
+        if [[ "${force_try}" != "y" && "${force_try}" != "Y" ]]; then
+            return 1
+        fi
+    else
+        echo -e "${green}域名解析正常：${domain} → ${resolved_ip}${plain}"
+    fi
+
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
     # 释放 80 端口
     free_port_80
 
-    # 第一次尝试申请
-    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 2>&1
-    local issue_result=$?
+    # 检查是否已有证书记录
+    local has_existing=false
+    if ~/.acme.sh/acme.sh --list 2>/dev/null | grep -q "${domain}"; then
+        has_existing=true
+        echo -e "${yellow}检测到域名 ${domain} 已有证书记录${plain}"
 
-    # 如果返回非0，可能是证书已存在（Skipping）或真的失败
-    if [[ $issue_result -ne 0 ]]; then
-        # 检查证书是否已存在（acme.sh 返回 2 表示 skip）
-        if ~/.acme.sh/acme.sh --list | grep -q "${domain}"; then
-            echo -e "${green}检测到域名 ${domain} 已有证书，直接安装...${plain}"
+        # 检查证书文件是否真的存在
+        local ecc_dir="${HOME}/.acme.sh/${domain}_ecc"
+        local rsa_dir="${HOME}/.acme.sh/${domain}"
+        if [[ -f "${ecc_dir}/fullchain.cer" ]] || [[ -f "${rsa_dir}/fullchain.cer" ]]; then
+            echo -e "${green}证书文件存在，直接安装...${plain}"
         else
-            # 真的失败了，用 --force 重试一次
-            echo -e "${yellow}首次申请未成功，正在使用 --force 重试...${plain}"
+            echo -e "${yellow}证书文件已丢失，使用 --force 重新申请...${plain}"
             ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
             if [[ $? -ne 0 ]]; then
-                echo -e "${red}证书申请失败！请检查域名 ${domain} 是否已正确解析到本机 IP${plain}"
+                echo -e "${red}证书重新申请失败！${plain}"
+                restore_port_80
+                return 1
+            fi
+        fi
+    else
+        # 全新申请
+        ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 2>&1
+        if [[ $? -ne 0 ]]; then
+            echo -e "${yellow}首次申请未成功，使用 --force 重试...${plain}"
+            ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
+            if [[ $? -ne 0 ]]; then
+                echo -e "${red}证书申请失败！请确认域名已正确解析到本机 IP${plain}"
                 restore_port_80
                 return 1
             fi
         fi
     fi
 
-    # 安装证书到指定目录
-    ~/.acme.sh/acme.sh --installcert -d "${domain}" \
-        --key-file "${certPath}/privkey.pem" \
-        --fullchain-file "${certPath}/fullchain.pem"
+    # 安装证书到指定目录（先尝试 ECC，失败再尝试 RSA）
+    local install_ok=false
 
-    if [[ $? -ne 0 ]]; then
+    ~/.acme.sh/acme.sh --installcert -d "${domain}" --ecc \
+        --key-file "${certPath}/privkey.pem" \
+        --fullchain-file "${certPath}/fullchain.pem" 2>&1
+    if [[ $? -eq 0 ]]; then
+        install_ok=true
+    else
+        echo -e "${yellow}ECC 方式安装失败，尝试 RSA 方式...${plain}"
+        ~/.acme.sh/acme.sh --installcert -d "${domain}" \
+            --key-file "${certPath}/privkey.pem" \
+            --fullchain-file "${certPath}/fullchain.pem" 2>&1
+        if [[ $? -eq 0 ]]; then
+            install_ok=true
+        fi
+    fi
+
+    if [[ "$install_ok" != true ]]; then
         echo -e "${red}证书安装到本地目录失败${plain}"
         restore_port_80
         return 1
     fi
 
-    ~/.acme.sh/acme.sh --upgrade --auto-upgrade
-    chmod 755 "${certPath}"/*
+    ~/.acme.sh/acme.sh --upgrade --auto-upgrade 2>/dev/null
+    chmod 755 "${certPath}"/* 2>/dev/null
 
     # 恢复之前停止的服务
     restore_port_80
