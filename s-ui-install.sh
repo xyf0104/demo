@@ -254,45 +254,74 @@ configure_ssl_in_sui() {
     if [[ ! -f "$dbFile" ]]; then
         echo -e "${yellow}数据库尚未创建，先启动一次 S-UI 以初始化...${plain}"
         systemctl start s-ui
-        sleep 3
+        sleep 5
         systemctl stop s-ui
     fi
 
     if [[ ! -f "$dbFile" ]]; then
         echo -e "${red}数据库文件不存在，无法自动配置 SSL${plain}"
-        echo -e "${yellow}请安装完成后在面板中手动配置域名和证书路径${plain}"
+        echo -e "${yellow}请在面板 Web 界面中手动填写域名和证书路径${plain}"
         return 1
     fi
 
-    # 获取 settings 表的字段名
-    local columns=$(sqlite3 "$dbFile" "PRAGMA table_info(settings);" 2>/dev/null | awk -F'|' '{print $2}')
-    
-    # 尝试不同的可能字段名来更新域名
-    for col in domain Domain; do
-        if echo "$columns" | grep -qw "$col"; then
-            sqlite3 "$dbFile" "UPDATE settings SET ${col}='${domain}';" 2>/dev/null
-            echo -e "${green}已设置域名：${domain}${plain}"
+    # 列出所有表
+    local tables=$(sqlite3 "$dbFile" ".tables" 2>/dev/null)
+    echo -e "${yellow}数据库表：${tables}${plain}"
+
+    # 找到设置表（可能叫 settings / setting / panel_settings 等）
+    local setting_table=""
+    for t in settings setting panel_settings config; do
+        if echo "$tables" | grep -qw "$t"; then
+            setting_table="$t"
             break
         fi
     done
 
-    # 尝试不同的可能字段名来更新证书路径
-    for col in cert_file certFile ssl_cert_path sslCertFile cert_path; do
-        if echo "$columns" | grep -qw "$col"; then
-            sqlite3 "$dbFile" "UPDATE settings SET ${col}='${certFile}';" 2>/dev/null
-            echo -e "${green}已设置证书路径：${certFile}${plain}"
-            break
-        fi
-    done
+    if [[ -z "$setting_table" ]]; then
+        echo -e "${red}未找到设置表，数据库中的表有：${tables}${plain}"
+        echo -e "${yellow}请在面板 Web 界面中手动填写域名和证书路径${plain}"
+        return 1
+    fi
 
-    # 尝试不同的可能字段名来更新密钥路径
-    for col in key_file keyFile ssl_key_path sslKeyFile key_path; do
-        if echo "$columns" | grep -qw "$col"; then
-            sqlite3 "$dbFile" "UPDATE settings SET ${col}='${keyFile}';" 2>/dev/null
-            echo -e "${green}已设置密钥路径：${keyFile}${plain}"
-            break
-        fi
-    done
+    echo -e "${yellow}使用设置表：${setting_table}${plain}"
+
+    # 获取该表所有字段
+    local all_columns=$(sqlite3 "$dbFile" "PRAGMA table_info(${setting_table});" 2>/dev/null | awk -F'|' '{print $2}')
+    echo -e "${yellow}表字段：${all_columns}${plain}"
+
+    # 停止服务避免写入冲突
+    systemctl stop s-ui 2>/dev/null
+
+    # 匹配域名字段（模糊匹配含 domain 的字段）
+    local domain_col=$(echo "$all_columns" | grep -i "domain" | head -1)
+    if [[ -n "$domain_col" ]]; then
+        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${domain_col}='${domain}';"
+        echo -e "${green}✅ 已设置域名 [${domain_col}] = ${domain}${plain}"
+    else
+        echo -e "${red}未找到域名字段${plain}"
+    fi
+
+    # 匹配证书字段（含 cert 的字段）
+    local cert_col=$(echo "$all_columns" | grep -i "cert" | head -1)
+    if [[ -n "$cert_col" ]]; then
+        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${cert_col}='${certFile}';"
+        echo -e "${green}✅ 已设置证书 [${cert_col}] = ${certFile}${plain}"
+    else
+        echo -e "${red}未找到证书字段${plain}"
+    fi
+
+    # 匹配密钥字段（含 key 的字段，排除 primary key 等）
+    local key_col=$(echo "$all_columns" | grep -i "key" | grep -iv "primary" | head -1)
+    if [[ -n "$key_col" ]]; then
+        sqlite3 "$dbFile" "UPDATE ${setting_table} SET ${key_col}='${keyFile}';"
+        echo -e "${green}✅ 已设置密钥 [${key_col}] = ${keyFile}${plain}"
+    else
+        echo -e "${red}未找到密钥字段${plain}"
+    fi
+
+    # 验证写入结果
+    echo -e "${yellow}验证数据库写入结果：${plain}"
+    sqlite3 "$dbFile" "SELECT * FROM ${setting_table} LIMIT 1;" 2>/dev/null | head -3
 
     return 0
 }
