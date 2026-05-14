@@ -1,19 +1,61 @@
-# demo
+# S-UI 汉化版安装脚本
 
-## RouteForwarder <https://youtu.be/dpmnkKhBFtc>
-## box5magisk <https://youtu.be/oRyjX44Bxw4>
-## 01 <https://youtu.be/VONkHvKkCX0>
-## 松鼠VPN节点提取相关文件 视频被下架，备份：<https://bulianglin.com/g/songsu/>
-## nodesCatch视频教程 <https://youtu.be/aSR6OuqtFdU>
-## 不良林 VPN <https://youtu.be/HuyPaM41ytA>
-## EasyClash <https://youtu.be/-I5T1G6NdKM> <https://youtu.be/1Xn-tRosThs>
-## nodesCatch V2.0视频教程 <https://youtu.be/fHJDvJIptts>
+基于 [bulianglin/demo](https://github.com/bulianglin/demo) 的 S-UI 面板，提供**全中文安装体验**和**SSL 证书一键配置**。
 
-### nodesCatch V2.0目前已知问题：
-1、有效节点变无效：一般是vmess节点，导入节点使用的是subconverter进行节点格式转换，但是windows版的subconverter有个bug，转换clash后会将vmess节点的aid参数丢失，如果你是直接粘贴clash配置文件到节点列表，可能会导致本来可以使用的vmess节点测速显示无效，目前的解决方法是直接粘贴url格式的节点到节点列表再测速，剩下的只有等工具作者修复
+## 一键安装
 
-2、无法导入节点：和clash.net有冲突，因为clash.net也内置了subconverter，解决方法是直接删掉测速软件目录里的subconverter目录，但是这样的话在使用测速软件时就必须运行clash.net。或者先退出clash.net再测速
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/xyf0104/demo/main/s-ui-install.sh)
+```
 
-3、切换测速配置文件失败：clash内核不允许 h2/grpc 的节点tls为false，解决方法是将传输协议为h2或者grpc的节点删除或者使用Xray内核测速
+## 功能特性
 
-## 订阅转换盗取节点 <https://youtu.be/u-tg9hJHLO0>
+- ✅ 安装脚本全中文交互
+- ✅ 管理菜单全中文（输入 `s-ui` 查看）
+- ✅ 安装时可选配置域名 + SSL 证书
+- ✅ 自动检测本地已有证书，避免重复申请
+- ✅ 自动释放 80 端口，申请完成后恢复服务
+- ✅ 自动将域名和证书路径写入 S-UI 数据库
+- ✅ 安装完成显示完整访问地址（含端口和路径）
+
+## 安装流程
+
+```
+1. 检测系统 & CPU 架构
+2. 安装基础依赖
+3. 下载 S-UI 最新版
+4. 自动覆盖汉化版管理脚本
+5. 交互配置：面板端口 / 路径 / 订阅端口 / 路径 / 管理员凭据
+6. 可选：域名 & SSL 证书配置
+   ├─ 本地已有证书 → 直接使用
+   ├─ acme.sh 缓存有证书 → 复制使用
+   └─ 全新申请 → 自动安装 acme.sh → 申请 Let's Encrypt 证书
+7. 启动服务，输出访问地址
+```
+
+## 管理命令
+
+```bash
+s-ui              # 打开管理菜单
+s-ui start        # 启动
+s-ui stop         # 停止
+s-ui restart      # 重启
+s-ui status       # 查看状态
+s-ui log          # 查看日志
+s-ui update       # 更新
+s-ui uninstall    # 卸载
+s-ui help         # 命令帮助
+```
+
+## 文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `s-ui-install.sh` | 一键安装脚本（服务器上运行） |
+| `s-ui.sh` | 汉化版管理脚本（安装后替换到 `/usr/bin/s-ui`） |
+
+## 致谢
+
+- [bulianglin/demo](https://github.com/bulianglin/demo) — 原版 S-UI
+- [alireza0/s-ui](https://github.com/alireza0/s-ui) — S-UI 面板项目
+- [acmesh-official/acme.sh](https://github.com/acmesh-official/acme.sh) — SSL 证书工具
