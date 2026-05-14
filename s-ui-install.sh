@@ -76,36 +76,120 @@ install_acme() {
     fi
 }
 
+# 释放 80 端口：检测占用进程并临时停止
+free_port_80() {
+    PORT80_STOPPED_SERVICES=()
+    PORT80_KILLED_PIDS=()
+
+    local pid_list=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K\d+' | sort -u)
+    if [[ -z "$pid_list" ]]; then
+        # 备用方式
+        pid_list=$(lsof -i :80 -t 2>/dev/null | sort -u)
+    fi
+
+    if [[ -z "$pid_list" ]]; then
+        echo -e "${green}80 端口空闲${plain}"
+        return 0
+    fi
+
+    echo -e "${yellow}检测到 80 端口被以下进程占用：${plain}"
+    for pid in $pid_list; do
+        local pname=$(ps -p "$pid" -o comm= 2>/dev/null)
+        echo -e "  PID: ${pid}  进程: ${pname}"
+    done
+
+    # 尝试通过 systemd 停止常见服务
+    for svc in nginx apache2 httpd caddy lighttpd s-ui; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            echo -e "${yellow}正在临时停止 ${svc} 服务...${plain}"
+            systemctl stop "$svc"
+            PORT80_STOPPED_SERVICES+=("$svc")
+        fi
+    done
+
+    # 再次检查是否还有进程占用
+    sleep 1
+    pid_list=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K\d+' | sort -u)
+    if [[ -z "$pid_list" ]]; then
+        pid_list=$(lsof -i :80 -t 2>/dev/null | sort -u)
+    fi
+
+    if [[ -n "$pid_list" ]]; then
+        echo -e "${yellow}仍有进程占用 80 端口，正在强制结束...${plain}"
+        for pid in $pid_list; do
+            local pname=$(ps -p "$pid" -o comm= 2>/dev/null)
+            echo -e "  强制结束 PID: ${pid} (${pname})"
+            kill -9 "$pid" 2>/dev/null
+            PORT80_KILLED_PIDS+=("$pid")
+        done
+        sleep 1
+    fi
+
+    echo -e "${green}80 端口已释放${plain}"
+    return 0
+}
+
+# 恢复之前停止的服务
+restore_port_80() {
+    for svc in "${PORT80_STOPPED_SERVICES[@]}"; do
+        if [[ "$svc" != "s-ui" ]]; then
+            echo -e "${yellow}正在恢复 ${svc} 服务...${plain}"
+            systemctl start "$svc" 2>/dev/null
+        fi
+    done
+}
+
 issue_ssl_cert() {
     local domain=$1
     local certPath="/root/cert/${domain}"
     mkdir -p "$certPath"
 
     echo -e "${yellow}正在为 ${domain} 申请 SSL 证书...${plain}"
-    echo -e "${yellow}注意：需要确保 80 端口未被占用且域名已解析到本机${plain}"
 
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
-    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80
 
-    if [[ $? -ne 0 ]]; then
-        echo -e "${red}证书申请失败！请检查：${plain}"
-        echo -e "  1. 域名 ${domain} 是否已解析到本机 IP"
-        echo -e "  2. 80 端口是否被其他程序占用"
-        return 1
+    # 释放 80 端口
+    free_port_80
+
+    # 第一次尝试申请
+    ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 2>&1
+    local issue_result=$?
+
+    # 如果返回非0，可能是证书已存在（Skipping）或真的失败
+    if [[ $issue_result -ne 0 ]]; then
+        # 检查证书是否已存在（acme.sh 返回 2 表示 skip）
+        if ~/.acme.sh/acme.sh --list | grep -q "${domain}"; then
+            echo -e "${green}检测到域名 ${domain} 已有证书，直接安装...${plain}"
+        else
+            # 真的失败了，用 --force 重试一次
+            echo -e "${yellow}首次申请未成功，正在使用 --force 重试...${plain}"
+            ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
+            if [[ $? -ne 0 ]]; then
+                echo -e "${red}证书申请失败！请检查域名 ${domain} 是否已正确解析到本机 IP${plain}"
+                restore_port_80
+                return 1
+            fi
+        fi
     fi
 
+    # 安装证书到指定目录
     ~/.acme.sh/acme.sh --installcert -d "${domain}" \
         --key-file "${certPath}/privkey.pem" \
         --fullchain-file "${certPath}/fullchain.pem"
 
     if [[ $? -ne 0 ]]; then
-        echo -e "${red}证书安装失败${plain}"
+        echo -e "${red}证书安装到本地目录失败${plain}"
+        restore_port_80
         return 1
     fi
 
     ~/.acme.sh/acme.sh --upgrade --auto-upgrade
     chmod 755 "${certPath}"/*
-    echo -e "${green}SSL 证书申请并安装成功！${plain}"
+
+    # 恢复之前停止的服务
+    restore_port_80
+
+    echo -e "${green}✅ SSL 证书申请并安装成功！${plain}"
     echo -e "  证书：${certPath}/fullchain.pem"
     echo -e "  密钥：${certPath}/privkey.pem"
     return 0
