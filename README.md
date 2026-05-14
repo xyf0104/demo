@@ -1,6 +1,6 @@
 # S-UI 汉化版安装脚本
 
-基于 [bulianglin/demo](https://github.com/bulianglin/demo) 的 S-UI 面板，提供**全中文安装体验**和**SSL 证书一键配置**。
+S-UI 面板，提供**全中文安装体验**和**SSL 证书一键配置**。
 
 ## 一键安装
 
@@ -56,6 +56,5 @@ s-ui help         # 命令帮助
 
 ## 致谢
 
-- [bulianglin/demo](https://github.com/bulianglin/demo) — 原版 S-UI
 - [alireza0/s-ui](https://github.com/alireza0/s-ui) — S-UI 面板项目
 - [acmesh-official/acme.sh](https://github.com/acmesh-official/acme.sh) — SSL 证书工具
