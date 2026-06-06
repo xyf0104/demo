@@ -35,6 +35,11 @@ arch() {
 }
 echo "CPU 架构：$(arch)"
 
+# NOTE: 下载源配置
+# 优先从自有仓库下载，回退到 bulianglin/demo
+REPO_PRIMARY="xyf0104/demo"
+REPO_FALLBACK="bulianglin/demo"
+
 install_base() {
     case "${release}" in
     centos | almalinux | rocky | oracle)
@@ -83,7 +88,6 @@ free_port_80() {
 
     local pid_list=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K\d+' | sort -u)
     if [[ -z "$pid_list" ]]; then
-        # 备用方式
         pid_list=$(lsof -i :80 -t 2>/dev/null | sort -u)
     fi
 
@@ -98,7 +102,6 @@ free_port_80() {
         echo -e "  PID: ${pid}  进程: ${pname}"
     done
 
-    # 尝试通过 systemd 停止常见服务
     for svc in nginx apache2 httpd caddy lighttpd s-ui; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             echo -e "${yellow}正在临时停止 ${svc} 服务...${plain}"
@@ -107,7 +110,6 @@ free_port_80() {
         fi
     done
 
-    # 再次检查是否还有进程占用
     sleep 1
     pid_list=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K\d+' | sort -u)
     if [[ -z "$pid_list" ]]; then
@@ -129,7 +131,6 @@ free_port_80() {
     return 0
 }
 
-# 恢复之前停止的服务
 restore_port_80() {
     for svc in "${PORT80_STOPPED_SERVICES[@]}"; do
         if [[ "$svc" != "s-ui" ]]; then
@@ -144,7 +145,7 @@ issue_ssl_cert() {
     local certPath="/root/cert/${domain}"
     mkdir -p "$certPath"
 
-    # ===== 第一优先：检查目标目录是否已有证书 =====
+    # 第一优先：检查目标目录是否已有证书
     if [[ -f "${certPath}/fullchain.pem" ]] && [[ -f "${certPath}/privkey.pem" ]]; then
         echo -e "${green}✅ 检测到本地已有证书文件：${plain}"
         echo -e "  证书：${certPath}/fullchain.pem"
@@ -153,7 +154,7 @@ issue_ssl_cert() {
         return 0
     fi
 
-    # ===== 第二优先：检查 acme.sh 缓存目录是否有证书 =====
+    # 第二优先：检查 acme.sh 缓存目录
     local ecc_dir="${HOME}/.acme.sh/${domain}_ecc"
     local rsa_dir="${HOME}/.acme.sh/${domain}"
     local found_in_acme=false
@@ -178,10 +179,9 @@ issue_ssl_cert() {
         return 0
     fi
 
-    # ===== 第三：全新申请证书 =====
+    # 第三：全新申请证书
     echo -e "${yellow}未找到已有证书，开始申请新证书...${plain}"
 
-    # DNS 预检查
     echo -e "${yellow}检查域名 DNS 解析...${plain}"
     local resolved_ip=$(dig +short "$domain" A 2>/dev/null | head -1)
     if [[ -z "$resolved_ip" ]]; then
@@ -203,10 +203,8 @@ issue_ssl_cert() {
 
     ~/.acme.sh/acme.sh --set-default-ca --server letsencrypt
 
-    # 释放 80 端口
     free_port_80
 
-    # 申请证书
     ~/.acme.sh/acme.sh --issue -d "${domain}" --standalone --httpport 80 --force 2>&1
     if [[ $? -ne 0 ]]; then
         echo -e "${red}证书申请失败！请确认域名已正确解析到本机 IP${plain}"
@@ -214,7 +212,6 @@ issue_ssl_cert() {
         return 1
     fi
 
-    # 安装证书（先 ECC 后 RSA）
     local install_ok=false
     ~/.acme.sh/acme.sh --installcert -d "${domain}" --ecc \
         --key-file "${certPath}/privkey.pem" \
@@ -244,8 +241,6 @@ issue_ssl_cert() {
     return 0
 }
 
-# 将域名和证书路径写入 S-UI 数据库
-# NOTE: S-UI settings 表是 key-value 结构（id, key, value 三列）
 configure_ssl_in_sui() {
     local domain=$1
     local certFile=$2
@@ -265,27 +260,26 @@ configure_ssl_in_sui() {
         return 1
     fi
 
-    # 停止服务避免写入冲突
     systemctl stop s-ui 2>/dev/null
 
     echo -e "${yellow}正在写入 SSL 配置到数据库...${plain}"
 
-    # 面板（web）配置
     sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='webDomain';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='webListen';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${certFile}' WHERE key='webCertFile';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${keyFile}' WHERE key='webKeyFile';"
 
-    # 订阅（sub）配置
     sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='subDomain';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${domain}' WHERE key='subListen';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${certFile}' WHERE key='subCertFile';"
     sqlite3 "$dbFile" "UPDATE settings SET value='${keyFile}' WHERE key='subKeyFile';"
 
-    # 验证写入结果
+    # NOTE: 设置时区为亚洲/上海（原版默认为 Asia/Tehran）
+    sqlite3 "$dbFile" "UPDATE settings SET value='Asia/Shanghai' WHERE key='timeLocation';"
+
     echo -e "${green}✅ SSL 配置已写入数据库：${plain}"
     sqlite3 "$dbFile" -header -column \
-        "SELECT key, value FROM settings WHERE key IN ('webDomain','webCertFile','webKeyFile','subDomain','subCertFile','subKeyFile','webListen','subListen');"
+        "SELECT key, value FROM settings WHERE key IN ('webDomain','webCertFile','webKeyFile','subDomain','subCertFile','subKeyFile','webListen','subListen','timeLocation');"
 
     return 0
 }
@@ -365,7 +359,6 @@ config_domain_ssl() {
         return
     fi
 
-    # 安装 acme.sh
     install_acme
     if [[ $? -ne 0 ]]; then
         echo -e "${red}acme.sh 安装失败，跳过 SSL 配置${plain}"
@@ -373,10 +366,8 @@ config_domain_ssl() {
         return
     fi
 
-    # 临时停止 S-UI 以释放端口
     systemctl stop s-ui 2>/dev/null
 
-    # 申请证书
     issue_ssl_cert "$input_domain"
     if [[ $? -ne 0 ]]; then
         echo -e "${red}证书申请失败，跳过 SSL 配置${plain}"
@@ -385,7 +376,6 @@ config_domain_ssl() {
         return
     fi
 
-    # 写入 S-UI 配置
     local certFile="/root/cert/${input_domain}/fullchain.pem"
     local keyFile="/root/cert/${input_domain}/privkey.pem"
     configure_ssl_in_sui "$input_domain" "$certFile" "$keyFile"
@@ -396,7 +386,6 @@ config_domain_ssl() {
     SSL_KEY="$keyFile"
 }
 
-# ========== 服务准备 ==========
 prepare_services() {
     if [[ -f "/etc/systemd/system/sing-box.service" ]]; then
         echo -e "${yellow}正在停止 sing-box 服务...${plain}"
@@ -412,32 +401,72 @@ prepare_services() {
     systemctl daemon-reload
 }
 
-# ========== 主安装函数 ==========
+# NOTE: 下载逻辑重构，支持从自有仓库优先下载
+download_s_ui() {
+    local version=$1
+    local arch_name=$(arch)
+    local filename="s-ui-linux-${arch_name}.tar.gz"
+    local target="/tmp/${filename}"
+
+    # 优先从自有仓库下载
+    echo -e "${yellow}尝试从 ${REPO_PRIMARY} 下载 v${version}...${plain}"
+    wget -N --no-check-certificate -O "${target}" \
+        "https://github.com/${REPO_PRIMARY}/releases/download/${version}/${filename}" 2>&1
+    if [[ $? -eq 0 ]] && [[ -s "${target}" ]]; then
+        echo -e "${green}从 ${REPO_PRIMARY} 下载成功${plain}"
+        return 0
+    fi
+
+    # 回退到 bulianglin/demo
+    echo -e "${yellow}主仓库不可用，回退到 ${REPO_FALLBACK}...${plain}"
+    wget -N --no-check-certificate -O "${target}" \
+        "https://github.com/${REPO_FALLBACK}/releases/download/${version}/${filename}" 2>&1
+    if [[ $? -eq 0 ]] && [[ -s "${target}" ]]; then
+        echo -e "${green}从 ${REPO_FALLBACK} 下载成功${plain}"
+        return 0
+    fi
+
+    echo -e "${red}下载 S-UI v${version} 失败！${plain}"
+    return 1
+}
+
+# NOTE: 获取最新版本号，优先从自有仓库
+get_latest_version() {
+    # 先从自有仓库获取
+    local version=$(curl -Ls "https://api.github.com/repos/${REPO_PRIMARY}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return 0
+    fi
+
+    # 回退
+    version=$(curl -Ls "https://api.github.com/repos/${REPO_FALLBACK}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [[ -n "$version" ]]; then
+        echo "$version"
+        return 0
+    fi
+
+    return 1
+}
+
 install_s-ui() {
     cd /tmp/
 
     if [ $# == 0 ]; then
-        last_version=$(curl -Ls "https://api.github.com/repos/bulianglin/demo/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        last_version=$(get_latest_version)
         if [[ ! -n "$last_version" ]]; then
             echo -e "${red}获取 S-UI 版本失败，可能是 GitHub API 限制${plain}"
             exit 1
         fi
         echo -e "最新版本：${green}${last_version}${plain}，开始下载..."
-        wget -N --no-check-certificate -O /tmp/s-ui-linux-$(arch).tar.gz \
-            https://github.com/bulianglin/demo/releases/download/${last_version}/s-ui-linux-$(arch).tar.gz
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 S-UI 失败，请确保服务器能访问 GitHub${plain}"
-            exit 1
-        fi
     else
         last_version=$1
         echo -e "开始安装 S-UI ${green}v$1${plain}"
-        wget -N --no-check-certificate -O /tmp/s-ui-linux-$(arch).tar.gz \
-            "https://github.com/bulianglin/demo/releases/download/${last_version}/s-ui-linux-$(arch).tar.gz"
-        if [[ $? -ne 0 ]]; then
-            echo -e "${red}下载 S-UI v$1 失败，请确认版本是否存在${plain}"
-            exit 1
-        fi
+    fi
+
+    download_s_ui "${last_version}"
+    if [[ $? -ne 0 ]]; then
+        exit 1
     fi
 
     if [[ -e /usr/local/s-ui/ ]]; then
@@ -451,7 +480,7 @@ install_s-ui() {
 
     # 下载汉化版管理脚本覆盖原版
     echo -e "${yellow}正在下载汉化版管理脚本...${plain}"
-    curl -sL https://raw.githubusercontent.com/xyf0104/demo/main/s-ui.sh -o s-ui/s-ui.sh
+    curl -sL "https://raw.githubusercontent.com/${REPO_PRIMARY}/main/s-ui.sh" -o s-ui/s-ui.sh
     chmod +x s-ui/s-ui.sh
 
     cp s-ui/s-ui.sh /usr/bin/s-ui
@@ -464,10 +493,9 @@ install_s-ui() {
 
     systemctl enable s-ui --now
 
-    # 域名 & SSL 配置（安装完成后）
+    # 域名 & SSL 配置
     config_domain_ssl
 
-    # 如果配置了 SSL，重启服务使配置生效
     if [[ "$SSL_CONFIGURED" == true ]]; then
         echo -e "${yellow}正在重启 S-UI 以加载 SSL 配置...${plain}"
         systemctl restart s-ui
@@ -479,29 +507,27 @@ install_s-ui() {
     echo -e "${green}S-UI v${last_version} 安装完成！${plain}"
     echo -e "————————————————————————————————————"
 
-    if [[ "$SSL_CONFIGURED" == true ]]; then
-        # 从 sui setting -show 提取端口和路径
-        local setting_info=$(/usr/local/s-ui/sui setting -show 2>/dev/null)
-        local panel_port=$(echo "$setting_info" | grep "Panel port" | awk '{print $NF}')
-        local panel_path=$(echo "$setting_info" | grep "Panel path" | awk '{print $NF}')
-        local sub_port=$(echo "$setting_info" | grep "Sub port" | awk '{print $NF}')
-        local sub_path=$(echo "$setting_info" | grep "Sub path" | awk '{print $NF}')
+    # 显示版本信息
+    echo -e "${green}核心版本：${plain}"
+    /usr/local/s-ui/sui -v
 
-        # 默认值
+    if [[ "$SSL_CONFIGURED" == true ]]; then
+        local setting_info=$(/usr/local/s-ui/sui setting -show 2>/dev/null)
+        local panel_port=$(echo "$setting_info" | grep -i "port" | head -1 | awk '{print $NF}')
+        local sub_port=$(echo "$setting_info" | grep -i "sub.*port" | head -1 | awk '{print $NF}')
+
         [[ -z "$panel_port" ]] && panel_port="2095"
-        [[ -z "$panel_path" ]] && panel_path="/"
 
         echo -e "${green}面板访问地址：${plain}"
-        echo -e "${green}  https://${SSL_DOMAIN}:${panel_port}${panel_path}${plain}"
+        echo -e "${green}  https://${SSL_DOMAIN}:${panel_port}${plain}"
         if [[ -n "$sub_port" ]]; then
             echo -e "${green}订阅访问地址：${plain}"
-            echo -e "${green}  https://${SSL_DOMAIN}:${sub_port}${sub_path}${plain}"
+            echo -e "${green}  https://${SSL_DOMAIN}:${sub_port}${plain}"
         fi
         echo -e ""
         echo -e "${yellow}证书路径：${SSL_CERT}${plain}"
         echo -e "${yellow}密钥路径：${SSL_KEY}${plain}"
     else
-        # 无 SSL，直接用 sui uri 输出
         echo -e "${green}面板访问地址：${plain}"
         /usr/local/s-ui/sui uri
     fi
